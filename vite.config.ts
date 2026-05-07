@@ -1,8 +1,11 @@
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type PluginOption } from "vite";
 import tailwindcss from "@tailwindcss/vite";
 import viteTsconfigPaths from "vite-tsconfig-paths";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
+
+/** Vercel sets VERCEL=1 during build — TanStack Start needs Nitro instead of Cloudflare Workers. */
+const isVercelBuild = () => process.env.VERCEL === "1";
 
 export default defineConfig(async ({ mode, command }) => {
   const envDefine: Record<string, string> = {};
@@ -11,31 +14,38 @@ export default defineConfig(async ({ mode, command }) => {
     envDefine[`import.meta.env.${key}`] = JSON.stringify(value);
   }
 
-  const plugins = [
+  const useVercelAdapter = command === "build" && isVercelBuild();
+
+  const tanstackPluginOptions = {
+    importProtection: {
+      behavior: "error" as const,
+      client: {
+        files: ["**/server/**"],
+        specifiers: ["server-only"],
+      },
+    },
+    // Custom Worker wrapper (error page) is Cloudflare-only; Vercel uses Nitro’s Node output.
+    ...(useVercelAdapter ? {} : { server: { entry: "server" as const } }),
+  };
+
+  const plugins: PluginOption[] = [
     tailwindcss(),
     viteTsconfigPaths({ projects: ["./tsconfig.json"] }),
   ];
 
-  if (command === "build") {
+  if (command === "build" && useVercelAdapter) {
+    const { nitro } = await import("nitro/vite");
+    plugins.push(...tanstackStart(tanstackPluginOptions), nitro(), viteReact());
+  } else if (command === "build") {
     const { cloudflare } = await import("@cloudflare/vite-plugin");
-    plugins.push(cloudflare({ viteEnvironment: { name: "ssr" } }));
+    plugins.push(
+      cloudflare({ viteEnvironment: { name: "ssr" } }),
+      ...tanstackStart(tanstackPluginOptions),
+      viteReact(),
+    );
+  } else {
+    plugins.push(...tanstackStart(tanstackPluginOptions), viteReact());
   }
-
-  plugins.push(
-    ...tanstackStart({
-      importProtection: {
-        behavior: "error",
-        client: {
-          files: ["**/server/**"],
-          specifiers: ["server-only"],
-        },
-      },
-      server: {
-        entry: "server",
-      },
-    }),
-    viteReact(),
-  );
 
   return {
     define: envDefine,
